@@ -521,7 +521,7 @@ export interface SettingsField {
   section: string;
   label: string;
   description: string;
-  type: "bool" | "int" | "url" | "path" | "string" | "choice" | "string_list";
+  type: "bool" | "int" | "time" | "url" | "path" | "string" | "choice" | "string_list";
   required: boolean;
   secret: boolean;
   restart_required: boolean;
@@ -605,12 +605,16 @@ export interface IntegrationStatusEntry {
   arr_type?: string;
   instance_key?: string;
   label?: string;
+  /** Round-trip time of the last live probe (arr_live entries only). */
+  latency_ms?: number;
 }
 
 export interface IntegrationsStatusResponse {
   checked_at: string | null;
   media: Record<string, IntegrationStatusEntry>;
   arr: Record<string, IntegrationStatusEntry>;
+  /** Live, non-sticky reachability per ARR instance (green/red dot). */
+  arr_live?: Record<string, IntegrationStatusEntry>;
   media_has_failure: boolean;
   arr_has_failure: boolean;
   settings_has_failure: boolean;

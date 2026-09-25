@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import os
 import re
+from datetime import date
 from pathlib import Path
 from typing import Literal
 
@@ -13,7 +14,7 @@ import requests
 from core.config import settings
 from core.logger import logger
 
-OverlayMode = Literal["off", "grayscale", "top_banner", "corner_logo"]
+OverlayMode = Literal["off", "grayscale", "top_banner", "corner_logo", "coming_soon_banner"]
 
 PORTRAIT_SIZE = (1000, 1500)
 LANDSCAPE_SIZE = (1920, 1080)
@@ -23,8 +24,14 @@ OVERLAY_META_FILENAME = ".poster-overlay.json"
 
 _LOGO_PATH = Path(__file__).resolve().parent / "assets" / "placeholdarr_logo_yellow.png"
 _FONT_PATH = Path(__file__).resolve().parent / "assets" / "fonts" / "SpaceGrotesk-Bold.ttf"
-_VALID_MODES = frozenset({"off", "grayscale", "top_banner", "corner_logo"})
+COMING_SOON_MODE = "coming_soon_banner"
+_VALID_MODES = frozenset({"off", "grayscale", "top_banner", "corner_logo", COMING_SOON_MODE})
 _TOP_BANNER_LAYOUT = "top-banner-space-grotesk-v2"
+_COMING_SOON_LAYOUT = "coming-soon-banner-v1"
+_COMING_SOON_DEFAULT_LABEL = "COMING SOON"
+_COMING_SOON_DEFAULT_DATE_FORMAT = "%d %b %Y"
+_COMING_SOON_DATE_FORMATS = frozenset({"%d %b %Y", "%d/%m/%Y", "%m/%d/%Y", "%Y-%m-%d"})
+_ACCENT_YELLOW = (250, 204, 21, 255)
 
 
 def _asset_digest(path: Path) -> str | None:
@@ -110,6 +117,35 @@ def poster_overlay_mode() -> str:
 
 def poster_overlay_enabled() -> bool:
     return poster_overlay_mode() != "off"
+
+
+def coming_soon_label() -> str:
+    raw = str(getattr(settings, "PLACEHOLDER_POSTER_COMING_SOON_LABEL", "") or "").strip()
+    return (raw or _COMING_SOON_DEFAULT_LABEL)[:32]
+
+
+def coming_soon_date_format() -> str:
+    raw = str(getattr(settings, "PLACEHOLDER_POSTER_COMING_SOON_DATE_FORMAT", "") or "").strip()
+    return raw if raw in _COMING_SOON_DATE_FORMATS else _COMING_SOON_DEFAULT_DATE_FORMAT
+
+
+def coming_soon_banner_text(release_date: date | None) -> str:
+    """Banner text for a not-yet-available title: ``LABEL`` or ``LABEL\\nDATE`` (two lines).
+
+    The value doubles as the cache signature stored in ``.poster-overlay.json`` so posters are
+    rewritten when the label, date format, or release date changes.
+    """
+    label = coming_soon_label().upper()
+    if release_date is None:
+        return f"{_COMING_SOON_LAYOUT}|{label}"
+    return f"{_COMING_SOON_LAYOUT}|{label}\n{release_date.strftime(coming_soon_date_format()).upper()}"
+
+
+def _banner_display_text(banner_text: str) -> str:
+    """Strip the layout signature prefix added by :func:`coming_soon_banner_text`."""
+    text = str(banner_text or "")
+    prefix = f"{_COMING_SOON_LAYOUT}|"
+    return text[len(prefix):] if text.startswith(prefix) else text
 
 
 def normalize_poster_url(url: str | None) -> str | None:
@@ -201,30 +237,50 @@ def _load_font(size: int):
     return ImageFont.load_default()
 
 
-def _apply_top_banner(img):
+def _fit_font(draw, text: str, max_width: int, start_size: int, min_size: int = 18):
+    """Largest bundled-font size (<= start_size) whose rendered ``text`` fits ``max_width``."""
+    size = max(min_size, int(start_size))
+    while size > min_size:
+        font = _load_font(size)
+        try:
+            width = draw.textlength(text, font=font)
+        except Exception:
+            return font
+        if width <= max_width:
+            return font
+        size -= 2
+    return _load_font(min_size)
+
+
+def _apply_top_banner(img, text: str = "PLACEHOLDER"):
     mods = _pillow()
     if mods is None:
         return img
     Image, ImageDraw, _, ImageFont, _ = mods
     out = img.convert("RGBA")
     w, h = out.size
-    bar_h = max(56, int(h * 0.11))
+    lines = [ln for ln in _banner_display_text(text).split("\n") if ln.strip()] or ["PLACEHOLDER"]
+    two_lines = len(lines) >= 2
+    bar_h = max(96, int(h * 0.15)) if two_lines else max(56, int(h * 0.11))
+    alpha = 0.78 if two_lines else 0.65
     overlay = Image.new("RGBA", out.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
-    draw.rectangle([0, 0, w, bar_h], fill=(0, 0, 0, int(255 * 0.65)))
+    draw.rectangle([0, 0, w, bar_h], fill=(0, 0, 0, int(255 * alpha)))
     out = Image.alpha_composite(out, overlay)
     draw = ImageDraw.Draw(out)
-    text = "PLACEHOLDER"
-    font_size = max(26, int(bar_h * 0.50))
-    font = _load_font(font_size)
-    # anchor="mm" centers on the point; naive bbox math ignores font ascender offset.
-    draw.text(
-        (w // 2, bar_h // 2),
-        text,
-        fill=(255, 255, 255, 255),
-        font=font,
-        anchor="mm",
-    )
+    max_w = int(w * 0.92)
+
+    if not two_lines:
+        font_size = max(26, int(bar_h * 0.50))
+        font = _fit_font(draw, lines[0], max_w, font_size)
+        # anchor="mm" centers on the point; naive bbox math ignores font ascender offset.
+        draw.text((w // 2, bar_h // 2), lines[0], fill=(255, 255, 255, 255), font=font, anchor="mm")
+        return out
+
+    label_font = _fit_font(draw, lines[0], max_w, int(bar_h * 0.30))
+    date_font = _fit_font(draw, lines[1], max_w, int(bar_h * 0.38))
+    draw.text((w // 2, int(bar_h * 0.31)), lines[0], fill=(255, 255, 255, 255), font=label_font, anchor="mm")
+    draw.text((w // 2, int(bar_h * 0.70)), lines[1], fill=_ACCENT_YELLOW, font=date_font, anchor="mm")
     return out
 
 
@@ -273,7 +329,7 @@ def _apply_corner_logo(img):
     return out
 
 
-def apply_overlay(img, mode: str, *, landscape: bool = False):
+def apply_overlay(img, mode: str, *, landscape: bool = False, banner_text: str | None = None):
     if _pillow() is None:
         _log_pillow_missing_once()
         return None
@@ -288,6 +344,9 @@ def apply_overlay(img, mode: str, *, landscape: bool = False):
         return _apply_top_banner(base)
     if want == "corner_logo":
         return _apply_corner_logo(base)
+    if want == COMING_SOON_MODE:
+        # Only titles that are not available yet get a banner; everything else stays untouched.
+        return _apply_top_banner(base, banner_text) if banner_text else base
     return base
 
 
@@ -318,7 +377,13 @@ def save_raw_poster_from_url(url: str | None, path: str, *, quality: int = 88) -
     return save_jpeg(img, path, quality=quality)
 
 
-def composite_poster_from_url(url: str | None, mode: str, *, landscape: bool = False):
+def composite_poster_from_url(
+    url: str | None,
+    mode: str,
+    *,
+    landscape: bool = False,
+    banner_text: str | None = None,
+):
     if _pillow() is None:
         _log_pillow_missing_once()
         return None
@@ -328,7 +393,7 @@ def composite_poster_from_url(url: str | None, mode: str, *, landscape: bool = F
     img = load_image_from_bytes(data)
     if img is None:
         return None
-    return apply_overlay(img, mode, landscape=landscape)
+    return apply_overlay(img, mode, landscape=landscape, banner_text=banner_text)
 
 
 def save_jpeg(img, path: str, *, quality: int = 88) -> bool:

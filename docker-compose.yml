@@ -11,6 +11,8 @@ services:
       DB_USER: placeholdarr
       DB_PASS: placeholdarr
       DB_NAME: placeholdarr
+      # Timezone used for time-of-day schedules (e.g. Full/Lite sync at 03:00).
+      TZ: Europe/Paris
       PUID: 1000
       PGID: 1000
     volumes:

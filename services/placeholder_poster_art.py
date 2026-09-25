@@ -9,9 +9,13 @@ import shutil
 from dataclasses import dataclass, field
 from typing import Any
 
+from datetime import date, datetime, timezone
+
 from core.logger import logger
 from services.poster_overlay import (
+    COMING_SOON_MODE,
     OVERLAY_META_FILENAME,
+    coming_soon_banner_text,
     composite_poster_from_url,
     logo_asset_stamp,
     normalize_poster_url,
@@ -117,6 +121,9 @@ def _normalize_outputs_map(raw: Any) -> dict[str, dict[str, str]]:
                 kind = str(value.get("source_kind") or "").strip()
                 if kind:
                     entry["source_kind"] = kind
+                banner = str(value.get("banner_text") or "")
+                if banner:
+                    entry["banner_text"] = banner
                 out[str(key)] = entry
         elif isinstance(value, str) and value.strip():
             out[str(key)] = {"file": value.strip(), "source_url": ""}
@@ -180,12 +187,15 @@ def _write_meta(
     source_url: str,
     output_basename: str,
     source_kind: str = "",
+    banner_text: str = "",
 ) -> None:
     existing = _read_meta(meta_path) or {}
     outputs = _normalize_outputs_map(existing.get("outputs"))
     entry: dict[str, str] = {"file": output_basename, "source_url": _normalize_art_url(source_url)}
     if source_kind:
         entry["source_kind"] = source_kind
+    if banner_text:
+        entry["banner_text"] = banner_text
     outputs[meta_key] = entry
     payload = {
         "mode": mode,
@@ -210,6 +220,7 @@ def _needs_regenerate(
     source_url: str,
     meta_key: str,
     source_kind: str = "",
+    banner_text: str = "",
 ) -> bool:
     source_url = _normalize_art_url(source_url)
     if not source_url:
@@ -228,6 +239,8 @@ def _needs_regenerate(
     if not entry:
         return True
     if source_kind and str(entry.get("source_kind") or "") != source_kind:
+        return True
+    if str(entry.get("banner_text") or "") != str(banner_text or ""):
         return True
     if _normalize_art_url(entry.get("source_url")) != source_url:
         return True
@@ -292,11 +305,18 @@ def resolve_library_grid_poster_path(
     return poster_abs
 
 
-def _save_image_to_path(output_path: str, url: str, *, mode: str, landscape: bool) -> bool:
+def _save_image_to_path(
+    output_path: str,
+    url: str,
+    *,
+    mode: str,
+    landscape: bool,
+    banner_text: str = "",
+) -> bool:
     """Write JPEG using overlay mode (raw when off or compositing unavailable)."""
-    if mode == "off":
+    if mode == "off" or (mode == COMING_SOON_MODE and not banner_text):
         return save_raw_poster_from_url(url, output_path)
-    img = composite_poster_from_url(url, mode, landscape=landscape)
+    img = composite_poster_from_url(url, mode, landscape=landscape, banner_text=banner_text or None)
     if img is not None:
         return save_jpeg(img, output_path)
     return save_raw_poster_from_url(url, output_path)
@@ -310,13 +330,19 @@ def _write_art_file(
     landscape: bool,
     meta_key: str,
     source_kind: str = "",
+    banner_text: str = "",
 ) -> bool:
     url = _normalize_art_url(source_url)
     if not url:
         return False
     meta_path = _meta_path_for_output(output_path)
     if not _needs_regenerate(
-        output_path, mode=mode, source_url=url, meta_key=meta_key, source_kind=source_kind
+        output_path,
+        mode=mode,
+        source_url=url,
+        meta_key=meta_key,
+        source_kind=source_kind,
+        banner_text=banner_text,
     ):
         artifacts = [output_path, meta_path]
         folder = os.path.dirname(os.path.abspath(output_path))
@@ -330,7 +356,7 @@ def _write_art_file(
                     artifacts.append(grid_path)
         _apply_art_file_permissions(output_path, *artifacts)
         return False
-    if not _save_image_to_path(output_path, url, mode=mode, landscape=landscape):
+    if not _save_image_to_path(output_path, url, mode=mode, landscape=landscape, banner_text=banner_text):
         return False
     _write_meta(
         meta_path,
@@ -339,6 +365,7 @@ def _write_art_file(
         source_url=url,
         output_basename=os.path.basename(output_path),
         source_kind=source_kind,
+        banner_text=banner_text,
     )
     artifacts = [output_path, meta_path]
     if meta_key == "series_poster":
@@ -455,6 +482,82 @@ def _note_local_poster_changed(kind: str, entity: Any) -> None:
         pass
 
 
+def _utc_today() -> date:
+    return datetime.now(timezone.utc).date()
+
+
+def coming_soon_text_for_movie(movie: Any, *, today: date | None = None) -> str:
+    """Banner text for a movie that is not digitally available yet, else ``""``.
+
+    Uses the Radarr digital release date from the calendar. Without a digital date the banner
+    shows only the label, and only while Radarr still reports the movie as unreleased.
+    """
+    if bool(getattr(movie, "has_file", False)):
+        return ""
+    now = today or _utc_today()
+    digital = getattr(movie, "digital_release_date", None)
+    if isinstance(digital, datetime):
+        digital = digital.date()
+    if digital is not None:
+        return coming_soon_banner_text(digital) if digital > now else ""
+    status = str(getattr(movie, "radarr_release_status", None) or "").strip().lower()
+    if status in {"tba", "announced", "incinemas"}:
+        return coming_soon_banner_text(None)
+    return ""
+
+
+def _season_availability(series_id: int, *, today: date | None = None) -> dict[int, tuple[bool, date | None, bool]]:
+    """Per-season ``(available, first_air_date, has_episodes)`` from the episode calendar.
+
+    A season is available once any episode has a file or has aired (air date <= today).
+    """
+    from services.postgres.db import session_scope
+    from services.postgres.models import Episode, Season
+
+    now = today or _utc_today()
+    out: dict[int, tuple[bool, date | None, bool]] = {}
+    with session_scope() as session:
+        rows = (
+            session.query(Season.id, Episode.air_date, Episode.has_file)
+            .join(Episode, Episode.season_id == Season.id)
+            .filter(
+                Season.series_id == int(series_id),
+                Season.is_deleted == False,  # noqa: E712
+                Season.season_number > 0,
+                Episode.is_deleted == False,  # noqa: E712
+            )
+            .all()
+        )
+    for season_id, air_date, has_file in rows:
+        available, first_air, _ = out.get(int(season_id), (False, None, True))
+        if bool(has_file) or (air_date is not None and air_date <= now):
+            available = True
+        if air_date is not None and (first_air is None or air_date < first_air):
+            first_air = air_date
+        out[int(season_id)] = (available, first_air, True)
+    return out
+
+
+def coming_soon_text_for_season(season: Any, availability: dict[int, tuple[bool, date | None, bool]]) -> str:
+    entry = availability.get(int(getattr(season, "id", 0) or 0))
+    if not entry:
+        return ""
+    available, first_air, _ = entry
+    if available:
+        return ""
+    return coming_soon_banner_text(first_air)
+
+
+def coming_soon_text_for_series(availability: dict[int, tuple[bool, date | None, bool]]) -> str:
+    """Series banner only while *no* season is available; date = earliest upcoming episode."""
+    if not availability:
+        return ""
+    if any(available for available, _, _ in availability.values()):
+        return ""
+    dates = [d for _, d, _ in availability.values() if d is not None]
+    return coming_soon_banner_text(min(dates) if dates else None)
+
+
 def ensure_library_grid_poster_for_movie(movie: Any, media_path: str) -> bool:
     """Ensure ``poster-grid.jpg`` exists for dashboard library (server-side catalog download)."""
     from services.poster_language import effective_poster_url, ensure_localized_poster_current
@@ -495,7 +598,8 @@ def ensure_movie_art(movie: Any, media_path: str) -> ArtResult:
     folder = os.path.dirname(os.path.abspath(media_path))
     out_path = os.path.join(folder, POSTER_JPEG)
     url = effective_poster_url(movie)
-    if _write_art_file(out_path, url, mode=mode, landscape=False, meta_key="poster"):
+    banner = coming_soon_text_for_movie(movie) if mode == COMING_SOON_MODE else ""
+    if _write_art_file(out_path, url, mode=mode, landscape=False, meta_key="poster", banner_text=banner):
         result.local_art.poster = POSTER_JPEG
         result.wrote_any = True
         result.art_counts["movie"] = 1
@@ -506,7 +610,13 @@ def ensure_movie_art(movie: Any, media_path: str) -> ArtResult:
     return result
 
 
-def ensure_season_art(season: Any, series: Any, series_folder: str) -> ArtResult:
+def ensure_season_art(
+    season: Any,
+    series: Any,
+    series_folder: str,
+    *,
+    availability: dict[int, tuple[bool, date | None, bool]] | None = None,
+) -> ArtResult:
     """Write seasonNN-poster.jpg at the series root."""
     from services.poster_language import ensure_localized_poster_current
 
@@ -521,6 +631,11 @@ def ensure_season_art(season: Any, series: Any, series_folder: str) -> ArtResult
     filename = season_poster_filename(season_number)
     out_path = os.path.join(folder, filename)
     url, kind = _season_poster_source(season, series)
+    banner = ""
+    if mode == COMING_SOON_MODE and season_number > 0:
+        if availability is None:
+            availability = _season_availability(int(getattr(series, "id", 0) or 0))
+        banner = coming_soon_text_for_season(season, availability)
     if _write_art_file(
         out_path,
         url,
@@ -528,6 +643,7 @@ def ensure_season_art(season: Any, series: Any, series_folder: str) -> ArtResult
         landscape=False,
         meta_key=_season_poster_meta_key(season_number),
         source_kind=kind,
+        banner_text=banner,
     ):
         result.local_art.poster = filename
         result.wrote_any = True
@@ -553,7 +669,20 @@ def ensure_series_art(
     out_path = os.path.join(folder, POSTER_JPEG)
     url = _normalize_art_url(effective_poster_url(series))
     kind = "series" if url else "none"
-    if _write_art_file(out_path, url, mode=mode, landscape=False, meta_key="series_poster", source_kind=kind):
+    availability: dict[int, tuple[bool, date | None, bool]] | None = None
+    series_banner = ""
+    if mode == COMING_SOON_MODE:
+        availability = _season_availability(int(getattr(series, "id", 0) or 0))
+        series_banner = coming_soon_text_for_series(availability)
+    if _write_art_file(
+        out_path,
+        url,
+        mode=mode,
+        landscape=False,
+        meta_key="series_poster",
+        source_kind=kind,
+        banner_text=series_banner,
+    ):
         result.local_art.poster = POSTER_JPEG
         result.wrote_any = True
         result.art_counts["series"] = 1
@@ -572,7 +701,7 @@ def ensure_series_art(
                     .all()
                 )
     for season in rows or []:
-        one = ensure_season_art(season, series, folder)
+        one = ensure_season_art(season, series, folder, availability=availability)
         if one.wrote_any:
             result.wrote_any = True
             result.merge_counts(one)

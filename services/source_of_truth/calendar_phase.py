@@ -508,6 +508,34 @@ def _switch_placeholder_dummy_variant(
     return bool(replaced or variant_changed or settings_changed)
 
 
+def _enqueue_coming_soon_banner_art_refresh(placeholder_ids: list[int], stats: dict[str, Any]) -> None:
+    """Refresh posters when the "Coming soon banner" overlay is on.
+
+    Banners depend on today's date (a title stops being "coming soon" once released, and release
+    dates can move), so re-check the calendar-window placeholders after each calendar phase. Art
+    writers skip files that are already up to date, so this only rewrites changed posters.
+    """
+    if not placeholder_ids:
+        return
+    try:
+        from services.poster_overlay import COMING_SOON_MODE, poster_overlay_mode
+
+        if poster_overlay_mode() != COMING_SOON_MODE:
+            return
+        from services.source_of_truth.placeholder_art_reconciler import enqueue_placeholder_art_refresh
+
+        stats["coming_soon_banner_art_refresh"] = enqueue_placeholder_art_refresh(
+            list(placeholder_ids),
+            merge_into_pending=False,
+            payload_extras={"refresh_only_if_wrote": True},
+        )
+    except Exception as exc:
+        logger.warning(
+            f"Calendar phase: coming-soon banner art refresh enqueue failed: {exc}",
+            extra={"emoji_type": "warning"},
+        )
+
+
 def _query_placeholders_for_calendar_phase(session, win_start: date, win_end: date):
     """Placeholders to evaluate: coming-soon rows, TBA (no date), date in window, or pinned.
 
@@ -826,4 +854,5 @@ def _run_calendar_phase_inner(stats: dict[str, Any]) -> dict[str, Any]:
         extra={"emoji_type": "info"},
     )
 
+    _enqueue_coming_soon_banner_art_refresh(candidate_ids, stats)
     return stats

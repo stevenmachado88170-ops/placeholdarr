@@ -9,6 +9,7 @@ from core.config import settings
 from services.source_of_truth.scheduled_sync import run_lite_sync, run_scheduled_full_sync
 from services.task_schedule_state import (
     bump_next_run_after_run,
+    get_anchor_time,
     get_persisted_next_run,
     persist_next_run,
     resolve_next_run_time,
@@ -85,7 +86,9 @@ def _start_interval(
             next_run_time=next_run_time,
         )
         logger.info(
-            f"{label} scheduler started: every {safe_interval_hours}h, next_run={next_run_time.isoformat()}",
+            f"{label} scheduler started: every {safe_interval_hours}h"
+            + (f" anchored at {anchor[0]:02d}:{anchor[1]:02d}" if (anchor := get_anchor_time(task_key)) else "")
+            + f", next_run={next_run_time.isoformat()}",
         )
     except Exception:
         logger.exception(f"Failed to start scheduler for {label}")
@@ -259,6 +262,8 @@ def get_scheduled_task_metadata() -> dict[str, Any]:
         hours = _interval_hours_for(task_key)
         out[task_key]["interval_hours"] = hours
         out[task_key]["enabled"] = hours > 0
+        anchor = get_anchor_time(task_key)
+        out[task_key]["time_of_day"] = f"{anchor[0]:02d}:{anchor[1]:02d}" if anchor else None
 
         persisted = get_persisted_next_run(task_key)
         if persisted:

@@ -31,6 +31,8 @@ NFO_BACKFILL_SETTING_KEYS = frozenset(
 ART_BACKFILL_SETTING_KEYS = frozenset(
     {
         "PLACEHOLDER_POSTER_OVERLAY_MODE",
+        "PLACEHOLDER_POSTER_COMING_SOON_LABEL",
+        "PLACEHOLDER_POSTER_COMING_SOON_DATE_FORMAT",
         "ENABLE_PREFERRED_POSTER_LANGUAGE",
         "PREFERRED_POSTER_LANGUAGE",
         "PREFER_ORIGINAL_POSTER_LANGUAGE",
@@ -427,6 +429,18 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             },
         ),
         (
+            "FULL_SYNC_TIME",
+            {
+                "section": "Library sync",
+                "label": "Scheduled full sync time of day",
+                "description": (
+                    "Optional. Run the full sync at this exact time (24h HH:MM, server local time - set the TZ variable on the container). With a 168h interval it runs weekly at that time. Leave empty to keep the plain every-N-hours behaviour."
+                ),
+                "type": "time",
+                "restart_required": True,
+            },
+        ),
+        (
             "LITE_SYNC_INTERVAL_HOURS",
             {
                 "section": "Library sync",
@@ -442,6 +456,18 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
             },
         ),
         (
+            "LITE_SYNC_TIME",
+            {
+                "section": "Library sync",
+                "label": "Scheduled lite sync time of day",
+                "description": (
+                    "Optional. Anchor lite sync to this time of day (24h HH:MM). With a 12h interval and 03:00 it runs at 03:00 and 15:00. Leave empty for plain every-N-hours behaviour."
+                ),
+                "type": "time",
+                "restart_required": True,
+            },
+        ),
+        (
             "COLLECTIONS_SYNC_INTERVAL_HOURS",
             {
                 "section": "Library sync",
@@ -452,6 +478,18 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                 ),
                 "type": "int",
                 "min": 0,
+                "restart_required": True,
+            },
+        ),
+        (
+            "COLLECTIONS_SYNC_TIME",
+            {
+                "section": "Library sync",
+                "label": "Scheduled collections sync time of day",
+                "description": (
+                    "Optional. Anchor the collections sync to this time of day (24h HH:MM). Leave empty for plain every-N-hours behaviour."
+                ),
+                "type": "time",
                 "restart_required": True,
             },
         ),
@@ -704,6 +742,40 @@ SETTINGS_SCHEMA: "OrderedDict[str, dict[str, Any]]" = OrderedDict(
                     {"value": "grayscale", "label": "Grayscale poster"},
                     {"value": "top_banner", "label": "Top banner — PLACEHOLDER"},
                     {"value": "corner_logo", "label": "Corner badge — Placeholdarr logo"},
+                    {"value": "coming_soon_banner", "label": "Coming soon banner — digital release date"},
+                ],
+            },
+        ),
+        (
+            "PLACEHOLDER_POSTER_COMING_SOON_LABEL",
+            {
+                "section": "Status Updates",
+                "label": "Coming soon banner text",
+                "description": (
+                    "Used by the Coming soon banner overlay. Text shown above the release date on posters of movies, "
+                    "series and seasons that are not available yet (for example COMING SOON or BIENTÔT DISPONIBLE)."
+                ),
+                "type": "string",
+                "restart_required": False,
+                "default": "COMING SOON",
+            },
+        ),
+        (
+            "PLACEHOLDER_POSTER_COMING_SOON_DATE_FORMAT",
+            {
+                "section": "Status Updates",
+                "label": "Coming soon banner date format",
+                "description": (
+                    "Used by the Coming soon banner overlay. Movies show the digital release date; series and seasons "
+                    "show the first upcoming episode air date from the calendar. Month names are in English."
+                ),
+                "type": "choice",
+                "restart_required": False,
+                "options": [
+                    {"value": "%d %b %Y", "label": "12 NOV 2026"},
+                    {"value": "%d/%m/%Y", "label": "12/11/2026 (day/month/year)"},
+                    {"value": "%m/%d/%Y", "label": "11/12/2026 (month/day/year)"},
+                    {"value": "%Y-%m-%d", "label": "2026-11-12 (ISO)"},
                 ],
             },
         ),
@@ -984,6 +1056,19 @@ def _normalized_stored_setting_value(key: str, value: Any) -> str:
     if isinstance(value, (dict, list)):
         return json.dumps(value, sort_keys=True, default=str)
     return str(value).strip()
+
+
+def _coerce_time_of_day(value: Any) -> str:
+    """Normalise to ``HH:MM`` (24h); empty string disables the time-of-day anchor."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    from services.task_schedule_state import parse_time_of_day
+
+    parsed = parse_time_of_day(text)
+    if parsed is None:
+        raise ValueError("must be a time in 24h HH:MM format (or empty)")
+    return f"{parsed[0]:02d}:{parsed[1]:02d}"
 
 
 def _coerce_url(value: Any) -> str:
@@ -1271,6 +1356,8 @@ def _validate_value(key: str, raw_value: Any) -> Any:
         value = _coerce_int(raw_value)
         if "min" in meta and value < int(meta["min"]):
             raise ValueError(f"must be >= {meta['min']}")
+    elif value_type == "time":
+        value = _coerce_time_of_day(raw_value)
     elif value_type == "url":
         value = _coerce_url(raw_value)
     elif value_type == "path":

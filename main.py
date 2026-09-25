@@ -541,6 +541,25 @@ async def lifespan(app: FastAPI):
                 extra={"emoji_type": "warning"},
             )
 
+    async def arr_live_health_loop():
+        """Keep the per-ARR green/red dot fresh (independent of the sticky "!" badge)."""
+        from core.config import settings
+        from services.integration_status import refresh_arr_live_health
+
+        interval = int(getattr(settings, "ARR_HEALTH_CHECK_INTERVAL_SECONDS", 30) or 0)
+        if interval <= 0:
+            logger.info("ARR live health checks disabled (ARR_HEALTH_CHECK_INTERVAL_SECONDS <= 0)")
+            return
+        interval = max(5, interval)
+        while True:
+            try:
+                await asyncio.to_thread(refresh_arr_live_health)
+            except Exception as exc:
+                logger.warning(f"ARR live health check failed: {exc}", extra={"emoji_type": "warning"})
+            await asyncio.sleep(interval)
+
+    asyncio.create_task(arr_live_health_loop())
+
     if refresh_integration_connection_status:
         asyncio.create_task(integration_connection_check_loop())
     else:

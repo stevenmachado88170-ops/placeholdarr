@@ -8,7 +8,10 @@ Failed Tests do not sticky (modal shows the error; Cancel leaves no !).
 
 from __future__ import annotations
 
+import logging
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlsplit
@@ -19,6 +22,9 @@ from core.logger import logger
 _lock = threading.RLock()
 _media: dict[str, dict[str, Any]] = {}
 _arr: dict[str, dict[str, Any]] = {}
+# Live (non-sticky) reachability of each ARR instance, refreshed by a background loop.
+# Unlike ``_arr`` (sticky "!" badge), this flips back to OK as soon as the ARR answers again.
+_arr_live: dict[str, dict[str, Any]] = {}
 _last_refresh_at: str | None = None
 
 _CONNECTIVITY_HTTP_CODES = {401, 403, 502, 503, 504}
@@ -228,10 +234,90 @@ def mark_media_connectivity_failure(service: str, *, message: str) -> None:
     record_media_status(service, ok=False, message=message, source="runtime")
 
 
+def _configured_arr_probe_specs() -> list[dict[str, str]]:
+    """Normalised list of configured Radarr/Sonarr instances that can be probed."""
+    specs: list[dict[str, str]] = []
+    for item in getattr(settings, "configured_arr_instances", []) or []:
+        arr_type = str(item.get("arr_type") or "").strip().lower()
+        if arr_type not in {"radarr", "sonarr"}:
+            continue
+        url = str(item.get("url") or "").strip()
+        api_key = str(item.get("api_key") or "").strip()
+        instance_key = str(item.get("instance_key") or "").strip().lower()
+        instance_id = str(item.get("instance_id") or item.get("id") or "").strip().lower()
+        if not instance_id:
+            instance_id = f"{arr_type}:{instance_key}" if instance_key else ""
+        if not url or not api_key or not instance_id:
+            continue
+        specs.append(
+            {
+                "instance_id": instance_id,
+                "arr_type": arr_type,
+                "instance_key": instance_key,
+                "label": str(item.get("label") or instance_key or instance_id).strip(),
+                "url": url,
+                "api_key": api_key,
+            }
+        )
+    return specs
+
+
+def _probe_arr_live(spec: dict[str, str]) -> dict[str, Any]:
+    from services.integrations import test_arr_connection
+
+    started = time.monotonic()
+    try:
+        result = test_arr_connection(spec["url"], spec["api_key"], spec["arr_type"])
+        ok = bool(result.get("ok"))
+        message = str(result.get("message") or "")
+    except Exception as exc:  # never let one instance break the whole sweep
+        ok = False
+        message = f"{type(exc).__name__} while testing {spec['label'] or spec['instance_id']}"
+    latency_ms = int((time.monotonic() - started) * 1000)
+    return {
+        "ok": ok,
+        "message": message or ("Connected" if ok else "Connection failed"),
+        "checked_at": _now_iso(),
+        "latency_ms": latency_ms,
+        "instance_id": spec["instance_id"],
+        "arr_type": spec["arr_type"],
+        "instance_key": spec["instance_key"],
+        "label": spec["label"],
+    }
+
+
+def refresh_arr_live_health() -> dict[str, dict[str, Any]]:
+    """Probe every configured ARR in parallel and update the live green/red status map."""
+    specs = _configured_arr_probe_specs()
+    results: dict[str, dict[str, Any]] = {}
+    if specs:
+        with ThreadPoolExecutor(max_workers=min(8, len(specs)), thread_name_prefix="arr-health") as pool:
+            for spec, entry in zip(specs, pool.map(_probe_arr_live, specs)):
+                results[spec["instance_id"]] = entry
+    with _lock:
+        for iid, entry in results.items():
+            previous = _arr_live.get(iid)
+            if previous is not None and bool(previous.get("ok")) != bool(entry["ok"]):
+                logger.log(
+                    logging.INFO if entry["ok"] else logging.WARNING,
+                    "ARR %s is now %s: %s",
+                    entry.get("label") or iid,
+                    "reachable" if entry["ok"] else "unreachable",
+                    entry["message"],
+                    extra={"emoji_type": "success" if entry["ok"] else "warning"},
+                )
+            _arr_live[iid] = entry
+        for iid in list(_arr_live.keys()):
+            if iid not in results:
+                _arr_live.pop(iid, None)
+        return {k: dict(v) for k, v in _arr_live.items()}
+
+
 def get_integration_status() -> dict[str, Any]:
     with _lock:
         media = {k: dict(v) for k, v in _media.items()}
         arr = {k: dict(v) for k, v in _arr.items()}
+        arr_live = {k: dict(v) for k, v in _arr_live.items()}
         checked_at = _last_refresh_at
     media_fail = any(not bool(v.get("ok")) for v in media.values())
     arr_fail = any(not bool(v.get("ok")) for v in arr.values())
@@ -239,6 +325,7 @@ def get_integration_status() -> dict[str, Any]:
         "checked_at": checked_at,
         "media": media,
         "arr": arr,
+        "arr_live": arr_live,
         "media_has_failure": media_fail,
         "arr_has_failure": arr_fail,
         "settings_has_failure": media_fail or arr_fail,

@@ -27,7 +27,7 @@ import {
   testIntegrationConnection,
   type NfoBackfillApplyScope,
 } from "./api/dashboard";
-import type { IntegrationsStatusResponse } from "./types/api";
+import type { IntegrationStatusEntry, IntegrationsStatusResponse } from "./types/api";
 import { postTaskRun } from "./api/tasks";
 import { fetchJson, postJson, setUnauthorizedHandler, getCsrfToken } from "./api/client";
 import { changePassword, getAuthStatus, getWebhookApiKey, logoutAuth, regenerateWebhookApiKey, type AuthStatus } from "./api/auth";
@@ -229,7 +229,15 @@ const LOOKAHEAD_FILTER_KEYS = [
   "PLAYBACK_SUPPRESS_SEARCH_FOR_FUTURE_EPISODES",
 ] as const;
 
+const COMING_SOON_BANNER_FIELD_KEYS = new Set([
+  "PLACEHOLDER_POSTER_COMING_SOON_LABEL",
+  "PLACEHOLDER_POSTER_COMING_SOON_DATE_FORMAT",
+]);
+
 function settingsFieldInteractionDisabled(field: SettingsField, values: Record<string, unknown>): boolean {
+  if (COMING_SOON_BANNER_FIELD_KEYS.has(field.key)) {
+    return String(values.PLACEHOLDER_POSTER_OVERLAY_MODE ?? "off").trim().toLowerCase() !== "coming_soon_banner";
+  }
   const disabledWhen = field.disabled_when;
   if (disabledWhen) {
     return Boolean(values[disabledWhen]);
@@ -403,6 +411,29 @@ function IntegrationFailureBadge(props: { title?: string; size?: "sm" | "md" }) 
   );
 }
 
+/** Live green/red/grey dot showing whether an ARR instance answers right now. */
+function ArrLiveDot(props: { entry?: IntegrationStatusEntry }) {
+  const entry = props.entry;
+  const state = entry == null ? "unknown" : entry.ok ? "up" : "down";
+  const color = state === "up" ? "#34d399" : state === "down" ? "#ef4444" : "#64748b";
+  const label =
+    state === "unknown"
+      ? "Checking connection…"
+      : `${entry?.ok ? "Connected" : "Unreachable"}${entry?.latency_ms != null && entry.ok ? ` (${entry.latency_ms} ms)` : ""}` +
+        `${entry?.message && !entry.ok ? ` — ${entry.message}` : ""}` +
+        `${entry?.checked_at ? ` · checked ${new Date(entry.checked_at).toLocaleTimeString()}` : ""}`;
+  return (
+    <span
+      className="inline-block h-2.5 w-2.5 shrink-0 rounded-full"
+      style={{ backgroundColor: color, boxShadow: state === "unknown" ? "none" : `0 0 6px ${color}` }}
+      title={label}
+      aria-label={label}
+      role="status"
+      data-arr-live-state={state}
+    />
+  );
+}
+
 /** Wizard stacked section bodies (bottom margin between sections). */
 const WIZARD_ONBOARDING_SECTION_SURFACE_CLASS = `mb-4 ${UI_SECTION_FRAME_CLASS} px-4 py-4 sm:px-5`;
 
@@ -419,6 +450,8 @@ const LOOK_AND_FEEL_FIELD_KEYS = [
   "PLACEHOLDER_STATUS_UPDATES",
   "PLACEHOLDER_STATUS_PROJECTION_MODE",
   "PLACEHOLDER_POSTER_OVERLAY_MODE",
+  "PLACEHOLDER_POSTER_COMING_SOON_LABEL",
+  "PLACEHOLDER_POSTER_COMING_SOON_DATE_FORMAT",
   "ENABLE_PREFERRED_POSTER_LANGUAGE",
   "PREFER_ORIGINAL_POSTER_LANGUAGE",
   "PREFERRED_POSTER_LANGUAGE",
@@ -430,6 +463,11 @@ const POSTER_OVERLAY_EXAMPLE_MODES = [
   { mode: "grayscale", label: "Grayscale poster", image: `${POSTER_OVERLAY_EXAMPLES_BASE}grayscale.jpg` },
   { mode: "top_banner", label: "Top banner — PLACEHOLDER", image: `${POSTER_OVERLAY_EXAMPLES_BASE}top_banner.jpg` },
   { mode: "corner_logo", label: "Corner badge — Placeholdarr logo", image: `${POSTER_OVERLAY_EXAMPLES_BASE}corner_logo.jpg` },
+  {
+    mode: "coming_soon_banner",
+    label: "Coming soon banner — digital release date",
+    image: `${POSTER_OVERLAY_EXAMPLES_BASE}coming_soon_banner.jpg`,
+  },
 ] as const;
 
 const TMDB_POSTER_IMG_BASE = "https://image.tmdb.org/t/p/w300";
@@ -4301,7 +4339,7 @@ function buildPersistableSettingsValues(values: FieldValueMap, payload: Settings
 
   if ("PLACEHOLDER_POSTER_OVERLAY_MODE" in cleaned) {
     const om = String(cleaned.PLACEHOLDER_POSTER_OVERLAY_MODE ?? "off").trim().toLowerCase();
-    if (!["off", "grayscale", "top_banner", "corner_logo"].includes(om)) {
+    if (!["off", "grayscale", "top_banner", "corner_logo", "coming_soon_banner"].includes(om)) {
       cleaned.PLACEHOLDER_POSTER_OVERLAY_MODE = "off";
     } else {
       cleaned.PLACEHOLDER_POSTER_OVERLAY_MODE = om;
@@ -4934,6 +4972,7 @@ function ArrInstancesEditor(props: {
                       <div className="flex min-h-[132px] flex-1 flex-col justify-between rounded-xl border border-white/[0.08] bg-[#0a0f18]/95 px-4 py-3">
                         <div className="min-w-0">
                           <div className="flex items-center gap-2 min-w-0">
+                            <ArrLiveDot entry={props.integrationsStatus?.arr_live?.[String(primaryItem.instance_id || primaryItem.id || "").toLowerCase()]} />
                             <div className="text-[16px] font-semibold text-white font-headline truncate">{primaryItem.label}</div>
                             {props.integrationsStatus?.arr?.[String(primaryItem.instance_id || primaryItem.id || "").toLowerCase()]?.ok === false ? (
                               <IntegrationFailureBadge
@@ -5035,6 +5074,7 @@ function ArrInstancesEditor(props: {
                       <div className="flex min-h-[132px] flex-1 flex-col justify-between rounded-xl border border-white/[0.08] bg-[#0a0f18]/95 px-4 py-3">
                         <div className="min-w-0">
                           <div className="flex items-center gap-2 min-w-0">
+                            <ArrLiveDot entry={props.integrationsStatus?.arr_live?.[String(secondaryItem.instance_id || secondaryItem.id || "").toLowerCase()]} />
                             <div className="text-[16px] font-semibold text-white font-headline truncate">{secondaryItem.label}</div>
                             {props.integrationsStatus?.arr?.[String(secondaryItem.instance_id || secondaryItem.id || "").toLowerCase()]?.ok === false ? (
                               <IntegrationFailureBadge
@@ -5339,7 +5379,7 @@ function LibraryPathsForm(props: {
     return (
       <input
         className={`w-full bg-[#0f1419] border ${border} rounded-lg px-3 py-2 text-[16px] text-slate-200 placeholder-slate-600 outline-none transition-colors ${focus} ${opts?.compact ? "text-[14px] py-1.5" : ""}`}
-        type={field.type === "int" ? "number" : field.secret ? "password" : "text"}
+        type={field.type === "int" ? "number" : field.type === "time" ? "time" : field.secret ? "password" : "text"}
         value={String(props.values[field.key] ?? "")}
         placeholder={ph}
         onChange={(e) => props.onValueChange(field.key, e.target.value)}
@@ -5400,7 +5440,7 @@ function LibraryPathsForm(props: {
           <div className="flex gap-2">
             <input
               className={`flex-1 bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 placeholder-slate-600 outline-none transition-colors ${focus}`}
-              type={field.type === "int" ? "number" : field.secret ? "password" : "text"}
+              type={field.type === "int" ? "number" : field.type === "time" ? "time" : field.secret ? "password" : "text"}
               value={String(value ?? "")}
               placeholder={field.secret && field.has_saved_value ? "Saved value retained unless overwritten" : `Enter ${field.label.toLowerCase()}...`}
               onChange={(e) => props.onValueChange(field.key, e.target.value)}
@@ -5702,6 +5742,12 @@ function PlaceholderPosterOverlayDescription(props: { spacing: "settings" | "wiz
         <span className="font-medium text-slate-200">Corner badge</span>
         {" — "}Placeholdarr logo badge in the bottom-right corner.
       </li>
+      <li>
+        <span className="font-medium text-slate-200">Coming soon banner</span>
+        {" — "}Only titles that are not available yet get a banner with the digital release date (movies) or the first
+        upcoming episode date (series and seasons), so you can tell at a glance without opening them. The banner
+        disappears once the title is available.
+      </li>
     </ul>
   );
 }
@@ -5709,8 +5755,8 @@ function PlaceholderPosterOverlayDescription(props: { spacing: "settings" | "wiz
 function PosterOverlayExamples(props: { selectedMode: string; compact?: boolean }) {
   const selected = String(props.selectedMode ?? "off").trim().toLowerCase();
   const gridClass = props.compact
-    ? "grid grid-cols-1 sm:grid-cols-3 gap-3"
-    : "grid grid-cols-1 sm:grid-cols-3 gap-4";
+    ? "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3"
+    : "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4";
   return (
     <details className="mt-3 group rounded-lg border border-[#424753]/40 bg-[#0b111b]/40">
       <summary className="cursor-pointer select-none list-none px-4 py-3 text-[14px] font-headline uppercase tracking-wider text-slate-300 flex items-center gap-2">
@@ -6442,7 +6488,7 @@ function SettingsPanel(props: {
           <div className="flex gap-2">
             <input
               className={`flex-1 bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 placeholder-slate-600 outline-none transition-colors ${getBrandFocusClass(props.brand, props.themeMode)} ${interactionLocked ? "cursor-not-allowed" : ""}`}
-              type={field.type === "int" ? "number" : field.secret ? "password" : "text"}
+              type={field.type === "int" ? "number" : field.type === "time" ? "time" : field.secret ? "password" : "text"}
               disabled={interactionLocked}
               value={String(value ?? "")}
               placeholder={field.secret && field.has_saved_value ? "Saved value retained unless overwritten" : `Enter ${field.label.toLowerCase()}...`}
@@ -7226,6 +7272,8 @@ const NFO_BACKFILL_SETTING_KEYS = [
   "PLACEHOLDER_STATUS_UPDATES",
   "PLACEHOLDER_STATUS_PROJECTION_MODE",
   "PLACEHOLDER_POSTER_OVERLAY_MODE",
+  "PLACEHOLDER_POSTER_COMING_SOON_LABEL",
+  "PLACEHOLDER_POSTER_COMING_SOON_DATE_FORMAT",
   "ENABLE_PREFERRED_POSTER_LANGUAGE",
   "PREFERRED_POSTER_LANGUAGE",
   "PREFER_ORIGINAL_POSTER_LANGUAGE",
@@ -9259,7 +9307,7 @@ function MediaServerConfigModal(props: {
                 ) : (
                   <input
                     className={`w-full rounded-lg border border-[#424753]/40 bg-[#0f1419] px-3 py-2 text-[16px] text-slate-200 placeholder-slate-600 outline-none transition-colors ${props.focusClass}`}
-                    type={field.type === "int" ? "number" : field.secret ? "password" : "text"}
+                    type={field.type === "int" ? "number" : field.type === "time" ? "time" : field.secret ? "password" : "text"}
                     value={String(value ?? "")}
                     placeholder={
                       field.secret && field.has_saved_value
@@ -9850,7 +9898,7 @@ function OnboardingWizard(props: {
           <div className="flex gap-2">
             <input
               className={`flex-1 min-w-0 bg-[#0f1419] border border-[#424753]/40 rounded-lg px-3 py-2 text-[16px] text-slate-200 placeholder-slate-600 outline-none transition-colors ${focus} ${interactionLocked ? "cursor-not-allowed" : ""}`}
-              type={field.type === "int" ? "number" : field.secret ? "password" : "text"}
+              type={field.type === "int" ? "number" : field.type === "time" ? "time" : field.secret ? "password" : "text"}
               disabled={interactionLocked}
               value={String(displayValue ?? "")}
               placeholder={field.secret && field.has_saved_value ? "Saved value retained unless overwritten" : `Enter ${field.label.toLowerCase()}...`}

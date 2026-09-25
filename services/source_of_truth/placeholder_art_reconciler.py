@@ -234,6 +234,9 @@ def process_placeholder_art_refresh_job(session, job: Job) -> dict:
 
     from services.task_run_phases import accumulate_art_backfill_counts, empty_art_counts
 
+    # Calendar-driven banner refreshes re-check many placeholders; only nudge media servers for
+    # folders whose art really changed (avoids a library-wide rescan every calendar run).
+    refresh_only_if_wrote = bool(payload.get("refresh_only_if_wrote"))
     placeholders = session.query(Placeholder).filter(Placeholder.id.in_(ids)).all()
     n_total = len(placeholders)
     wrote = 0
@@ -282,7 +285,8 @@ def process_placeholder_art_refresh_job(session, job: Job) -> dict:
                         wrote += 1
                         for k, v in result.art_counts.items():
                             batch_counts[k] = int(batch_counts.get(k, 0)) + int(v)
-                    refresh_paths.add(os.path.dirname(os.path.abspath(path)))
+                    if result.wrote_any or not refresh_only_if_wrote:
+                        refresh_paths.add(os.path.dirname(os.path.abspath(path)))
                 continue
 
             if not episode or not bool(getattr(episode, "has_placeholder", False)):
@@ -310,7 +314,7 @@ def process_placeholder_art_refresh_job(session, job: Job) -> dict:
                     wrote += 1
                     for k, v in series_result.art_counts.items():
                         batch_counts[k] = int(batch_counts.get(k, 0)) + int(v)
-                if series_folder:
+                if series_folder and (series_result.wrote_any or not refresh_only_if_wrote):
                     refresh_paths.add(os.path.abspath(series_folder))
 
             still_result = ensure_episode_still_art(episode, season, series, path)
@@ -318,7 +322,8 @@ def process_placeholder_art_refresh_job(session, job: Job) -> dict:
                 wrote += 1
                 for k, v in still_result.art_counts.items():
                     batch_counts[k] = int(batch_counts.get(k, 0)) + int(v)
-            refresh_paths.add(os.path.dirname(os.path.abspath(path)))
+            if still_result.wrote_any or not refresh_only_if_wrote:
+                refresh_paths.add(os.path.dirname(os.path.abspath(path)))
     finally:
         stop_hb.set()
 

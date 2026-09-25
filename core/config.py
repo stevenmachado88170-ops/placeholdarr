@@ -237,6 +237,11 @@ class Settings(BaseSettings):
     FULL_SYNC_INTERVAL_HOURS: int = 168
     # Lite sync: ARR catalog diff + calendar date refresh + calendar phase (replaces separate calendar cron when > 0).
     LITE_SYNC_INTERVAL_HOURS: int = 12
+    # Optional time-of-day anchors ("HH:MM", 24h, server local time / TZ env). Empty = plain interval.
+    FULL_SYNC_TIME: str = ""
+    LITE_SYNC_TIME: str = ""
+    # Seconds between live reachability checks of each Radarr/Sonarr (green/red dot in the UI). <= 0 disables.
+    ARR_HEALTH_CHECK_INTERVAL_SECONDS: int = 30
     # Arr tag labels (JSON string arrays) that drive Never / Pinned placeholder policy on sync.
     PLACEHOLDER_POLICY_NEVER_TAGS: str = '["placeholdarr-never"]'
     PLACEHOLDER_POLICY_PINNED_TAGS: str = '["placeholdarr-pinned"]'
@@ -250,6 +255,7 @@ class Settings(BaseSettings):
     TAUTULLI_API_KEY: Optional[str] = None
     # How often to run enabled collection recipes. <= 0 disables the scheduled job.
     COLLECTIONS_SYNC_INTERVAL_HOURS: int = 24
+    COLLECTIONS_SYNC_TIME: str = ""
 
     # Dashboard authentication (see services/auth.py). Env AUTH_MODE overrides DB when set.
     AUTH_MODE: str = os.getenv("AUTH_MODE", "builtin").split("#")[0].strip().lower() or "builtin"
@@ -326,9 +332,12 @@ class Settings(BaseSettings):
         or "protect_siblings"
     )
     # Composited local poster art for placeholders in Plex/Jellyfin/Emby (off = remote URLs in NFO only).
-    PLACEHOLDER_POSTER_OVERLAY_MODE: Literal["off", "grayscale", "top_banner", "corner_logo"] = (
+    PLACEHOLDER_POSTER_OVERLAY_MODE: Literal["off", "grayscale", "top_banner", "corner_logo", "coming_soon_banner"] = (
         os.getenv("PLACEHOLDER_POSTER_OVERLAY_MODE", "off").split("#")[0].strip().lower() or "off"
     )
+    # "Coming soon banner" overlay text (banner over posters of titles not available yet).
+    PLACEHOLDER_POSTER_COMING_SOON_LABEL: str = "COMING SOON"
+    PLACEHOLDER_POSTER_COMING_SOON_DATE_FORMAT: str = "%d %b %Y"
     # Preferred TMDB poster language (ISO 639-1). Requires ENABLE_PREFERRED_POSTER_LANGUAGE.
     ENABLE_PREFERRED_POSTER_LANGUAGE: bool = (
         os.getenv("ENABLE_PREFERRED_POSTER_LANGUAGE", "false").split("#")[0].strip().lower()
